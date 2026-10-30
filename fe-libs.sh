@@ -618,7 +618,8 @@ push_pointer_only() {
 gate_in_consumer() {
   local lib="$1" base="$2" front files
   front="$REPO_ROOT/$(dirname "$lib")"
-  [ -f "$front/package.json" ] || { dim "  gate: no package.json beside $lib — skipped"; return 0; }
+  grep -q '"type-check:gate"' "$front/package.json" 2>/dev/null \
+    || { dim "  gate: no frontend beside $lib — skipped"; return 0; }
   files="$(git -C "$REPO_ROOT/$lib" diff --name-only --diff-filter=d "$base..HEAD" -- '*.vue' '*.ts' \
            | sed "s|^|$(basename "$lib")/|")"
   if [ -n "$files" ]; then
