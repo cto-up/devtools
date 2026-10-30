@@ -5,7 +5,7 @@
   docs-check.py stale --days N DIR...     pages whose `reviewed` is older than N days (report only)
   docs-check.py links DIR...              relative Markdown links point at files that exist
   docs-check.py site-links SITE_ROOT      absolute links in built HTML resolve inside SITE_ROOT
-  docs-check.py forbid --pattern RE DIR... no page matches RE (e.g. product names in shared docs)
+  docs-check.py forbid --pattern RE DIR... no page's prose matches RE (e.g. product names in shared docs)
   docs-check.py env --code DIR --doc FILE every env var the Go code reads is named in FILE
 
 Every DIR is walked for *.md; a directory named in --exclude (repeatable) is
@@ -152,12 +152,17 @@ def cmd_site_links(a):
     return report(sorted(set(bad)), "broken cross-site link")
 
 
+LINK_TARGET = re.compile(r"\]\([^)]*\)")
+
+
 def cmd_forbid(a):
+    """Prose only: code and link targets name real identifiers (a metric, a
+    path, a repo URL) that a shared page may quote."""
     rx = re.compile(a.pattern, re.IGNORECASE)
     bad = []
     for p in pages(a.dirs, set(a.exclude)):
-        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
-            m = rx.search(line)
+        for n, line in prose_lines(p.read_text(encoding="utf-8")):
+            m = rx.search(LINK_TARGET.sub("]", line))
             if m:
                 bad.append(f"{p}:{n}: {m.group(0)!r}")
     return report(bad, f"match for {a.pattern}")
