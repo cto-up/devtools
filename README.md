@@ -10,6 +10,7 @@ same way a library fix does.
 | `fe-libs.sh` | Keeps the shared library submodules moving forward in every consumer: `status`, `attach`, `work`, `ship`, `publish`, `sync`, `bump`, `verify`. See its header. |
 | `libs.mk` | The `make libs-*` targets that call it. |
 | `test-it.sh` | DB-backed tests on a throwaway clone of the local dev database. See its header. |
+| `gen-docs-site.py` | Regenerates a consumer's MkDocs stub trees and navs from `docs/`, including pages owned by a library in `docs/platform-docs/libs/`. What each site publishes comes from the consumer's `docs-site/sites.json`. See its header. |
 | `docs.mk` | The `make docs-lint` / `docs-stale` / `docs-site-links` targets that call `docs-check.py` and Vale. See its header. |
 | `docs-check.py` | Checks for a `docs/` tree: front matter, stale pages, relative and cross-site links, forbidden words, env vars the Go code reads but the docs never name. See its header. |
 
