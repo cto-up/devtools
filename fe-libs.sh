@@ -47,10 +47,11 @@ bold() { printf '\033[1m%s\033[0m\n' "$*"; }
 dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
 
 # Submodule paths that look like a shared frontend library, plus this tooling
-# itself, so a change here ships and is verified like any library.
+# itself and the shared docs, so a change there ships and is verified like any
+# library.
 libs_of() {
   git -C "$1" config -f .gitmodules --get-regexp '^submodule\..*\.path$' 2>/dev/null \
-    | awk '{print $2}' | grep -E -- '(-fe-lib|^devtools)$' || true
+    | awk '{print $2}' | grep -E -- '(-fe-lib|^devtools|/platform-docs)$' || true
 }
 
 # The library's default branch, from the remote rather than assumed.
