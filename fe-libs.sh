@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # Keep the shared *-fe-lib submodules moving forward across every consumer.
 #
-# THE PROBLEM THIS SOLVES. Each library has two working copies: the sibling
-# checkout at apps/<name>-fe-lib (where codegen writes) and a submodule inside
-# each consumer. Commit in one and the other diverges, and once a consumer is
-# far enough behind that a full update looks risky, people start lifting single
-# fixes across — which is the cherry-picking we are trying to end.
+# THE PROBLEM THIS SOLVES. A library lives as a submodule inside every
+# consumer. A commit made in one of them and never pushed exists nowhere else:
+# another agent redoes the work upstream, the two diverge, and once a consumer
+# is far enough behind that a full update looks risky, people start lifting
+# single fixes across — which is the cherry-picking we are trying to end. There
+# are no sibling clones of the libraries any more: they were a second place to
+# leave such commits, and nothing builds or tests them.
 #
-# THE RULE: a library change must be PUSHED before any consumer pins it. Not
-# "never edit in a submodule" — you need a consumer's test suite and dev server
-# to know whether a change works, and the sibling checkout has neither. Edit
-# wherever you can test it; just publish before you pin.
+# THE RULE: a library change must be PUSHED before any consumer pins it, and a
+# library commit is made by `ship`, which pushes it in the same step. The
+# pre-commit hook calls `guard`, which refuses any other commit in a library.
+# Edit inside a consumer — it has the test suite and the dev server.
 #
 # `verify` enforces exactly that and nothing more: every pointer must be an
 # ancestor of its library's default branch. A commit that only exists inside one
@@ -29,7 +31,12 @@
 #                                       PUSH=1 also pushes each consumer whose
 #                                       unpushed commits are pointer bumps only
 #   ./devtools/fe-libs.sh publish [lib]  push submodule commits, then re-pin
-#   ./devtools/fe-libs.sh sync           fast-forward every sibling checkout
+#   ./devtools/fe-libs.sh drift [--fetch]
+#                                       only what is unpushed or uncommitted, in
+#                                       every consumer and Go library; silent
+#                                       when nothing is (the SessionStart hook)
+#   ./devtools/fe-libs.sh guard <dir>    pre-commit: refuse a library commit
+#                                       that is not made by ship
 #   ./devtools/fe-libs.sh bump           move this repo's pointers to the default branch
 #   ./devtools/fe-libs.sh verify         CI guard: is every pointer published?
 set -uo pipefail
@@ -62,8 +69,6 @@ default_branch_of() {
   git -C "$dir" show-ref --verify --quiet refs/remotes/origin/main && { echo main; return; }
   echo master
 }
-
-sibling_of() { echo "$APPS_DIR/$(basename "$1")"; }
 
 # A user-typed library name → its submodule path. Accepts the full name
 # (core-fe-lib), the short one (core) and the path (frontend/core-fe-lib),
@@ -141,6 +146,25 @@ attach_at() {
 # every attach sets it in this clone's config.
 keep_attached() { git -C "$1" config "submodule.$2.update" merge; }
 
+# A submodule inherits no hooks from its superproject, so point it at the
+# consumer's .githooks — that is where `guard` runs. Absolute, because git
+# resolves a relative core.hooksPath against the submodule's own top level.
+use_consumer_hooks() {
+  [ -d "$REPO_ROOT/.githooks" ] && git -C "$1" config core.hooksPath "$REPO_ROOT/.githooks"
+}
+
+# Commits the repo at $1 has that its origin does not, and its uncommitted
+# tracked changes, as "+n" and "*" ("" when neither). Untracked files are left
+# out: they move no history and are usually tool output.
+unpushed_state() {
+  local dir="$1" ahead dirty state=""
+  ahead="$(git -C "$dir" rev-list --count HEAD --not --remotes=origin 2>/dev/null || echo 0)"
+  dirty="$(git -C "$dir" status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')"
+  [ "$ahead" != "0" ] && state="+$ahead"
+  [ "$dirty" != "0" ] && state="$state*"
+  echo "$state"
+}
+
 cmd_attach() {
   bold "Putting every submodule on its branch, at the commit $(basename "$REPO_ROOT") pins"
   local moved=0 stuck=0
@@ -156,6 +180,7 @@ cmd_attach() {
     was="$(git -C "$dir" symbolic-ref -q --short HEAD || echo '')"
     if err="$(attach_at "$dir" "$branch" "$pin")"; then
       keep_attached "$REPO_ROOT" "$lib"
+      use_consumer_hooks "$dir"
       if [ -z "$was" ]; then
         printf '  %-22s attached to %s at %s\n' "$name" "$branch" "${pin:0:8}"
         moved=$((moved + 1))
@@ -183,65 +208,95 @@ cmd_status() {
   need_consumers
   bold "Shared frontend libraries — what each consumer pins"
   echo
-  printf '%-22s %-10s %s\n' "LIBRARY" "SIBLING" "CONSUMERS (commits behind the library's default branch)"
+  printf '%-22s %s\n' "LIBRARY" "CONSUMERS"
   for lib in $(libs_of "$REPO_ROOT"); do
-    local name sib branch sib_state
+    local name ref branch line=""
     name="$(basename "$lib")"
-    sib="$(sibling_of "$lib")"
-    if [ ! -d "$sib/.git" ]; then
-      printf '%-22s %-10s %s\n' "$name" "absent" "(no sibling checkout)"
-      continue
+    ref="$REPO_ROOT/$lib"
+    if [ ! -d "$ref/.git" ] && [ ! -f "$ref/.git" ]; then
+      printf '%-22s %s\n' "$name" "(not initialised here)"; continue
     fi
-    [ "$fetch" = "--fetch" ] && git -C "$sib" fetch origin --quiet 2>/dev/null
-    branch="$(default_branch_of "$sib")"
-    local dirty ahead behind
-    dirty="$(git -C "$sib" status --porcelain | wc -l | tr -d ' ')"
-    ahead="$(git -C "$sib" rev-list --count "origin/$branch"..HEAD 2>/dev/null || echo 0)"
-    behind="$(git -C "$sib" rev-list --count HEAD.."origin/$branch" 2>/dev/null || echo 0)"
-    sib_state="ok"
-    [ "$behind" != "0" ] && sib_state="-$behind"
-    [ "$ahead"  != "0" ] && sib_state="+$ahead${sib_state#ok}"
-    [ "$dirty"  != "0" ] && sib_state="$sib_state*"
-
-    local line=""
+    [ "$fetch" = "--fetch" ] && git -C "$ref" fetch origin --quiet 2>/dev/null
+    branch="$(default_branch_of "$ref")"
     for c in $CONSUMERS; do
-      local croot="$APPS_DIR/$c" sha n
+      local croot="$APPS_DIR/$c" cdir sha n cell
       [ -d "$croot/.git" ] || continue
       sha="$(git -C "$croot" ls-tree HEAD "$lib" 2>/dev/null | awk '{print $3}')"
       if [ -z "$sha" ]; then line="$line  $c:—"; continue; fi
-      n="$(git -C "$sib" rev-list --count "$sha".."origin/$branch" 2>/dev/null)"
-      if [ -z "$n" ]; then line="$line  $c:UNKNOWN"
-      elif [ "$n" = "0" ]; then line="$line  $c:current"
-      else line="$line  $c:-$n"; fi
+      n="$(git -C "$ref" rev-list --count "$sha".."origin/$branch" 2>/dev/null)"
+      if [ -z "$n" ]; then cell="UNKNOWN"
+      elif [ "$n" = "0" ]; then cell="current"
+      else cell="-$n"; fi
+      cdir="$croot/$lib"
+      if [ -d "$cdir/.git" ] || [ -f "$cdir/.git" ]; then
+        [ "$fetch" = "--fetch" ] && [ "$cdir" != "$ref" ] && git -C "$cdir" fetch origin --quiet 2>/dev/null
+        cell="$cell$(unpushed_state "$cdir")"
+      fi
+      line="$line  $c:$cell"
     done
-    printf '%-22s %-10s%s\n' "$name" "$sib_state" "$line"
+    printf '%-22s%s\n' "$name" "$line"
   done
   echo
-  dim "sibling: -n behind · +n unpushed · * uncommitted     consumer: -n commits behind"
+  dim "-n commits behind · +n unpushed commits · * uncommitted changes"
   dim "UNKNOWN = the pinned commit is not in the library — see 'verify'."
 }
 
-cmd_sync() {
-  bold "Fast-forwarding sibling checkouts"
-  local blocked=0
-  for lib in $(libs_of "$REPO_ROOT"); do
-    local sib name branch
-    name="$(basename "$lib")"; sib="$(sibling_of "$lib")"
-    [ -d "$sib/.git" ] || continue
-    git -C "$sib" fetch origin --quiet 2>/dev/null
-    branch="$(default_branch_of "$sib")"
-    if [ -n "$(git -C "$sib" status --porcelain)" ]; then
-      printf '  %-22s SKIPPED — uncommitted changes (yours to resolve)\n' "$name"
-      blocked=$((blocked + 1)); continue
-    fi
-    if git -C "$sib" merge --ff-only "origin/$branch" >/dev/null 2>&1; then
-      printf '  %-22s up to date\n' "$name"
-    else
-      printf '  %-22s DIVERGED — needs a human (rebase or merge)\n' "$name"
-      blocked=$((blocked + 1))
-    fi
+# ── drift ─────────────────────────────────────────────────────────────────────
+# Everything that exists on this machine and nowhere else: unpushed commits and
+# uncommitted changes in every consumer's library submodules, consumers ahead of
+# their upstream, and the Go library checkouts beside them (apps/*-lib). Silent
+# when there is none, so it can run at the start of every session and only
+# speak when a commit is about to be stranded.
+cmd_drift() {
+  local fetch="${1:-}" found="" dirs=""
+  need_consumers
+  for c in $CONSUMERS; do
+    local croot="$APPS_DIR/$c"
+    [ -d "$croot/.git" ] || continue
+    dirs="$dirs $croot"
+    for lib in $(libs_of "$croot"); do
+      [ -d "$croot/$lib/.git" ] || [ -f "$croot/$lib/.git" ] && dirs="$dirs $croot/$lib"
+    done
   done
-  [ "$blocked" -gt 0 ] && echo && dim "$blocked library(ies) need attention before they can move."
+  for d in "$APPS_DIR"/*-lib; do
+    case "$d" in *-fe-lib) continue ;; esac
+    [ -d "$d/.git" ] && dirs="$dirs $d"
+  done
+
+  if [ "$fetch" = "--fetch" ]; then
+    for d in $dirs; do GIT_TERMINAL_PROMPT=0 git -C "$d" fetch origin --quiet 2>/dev/null & done
+    wait
+  fi
+
+  for d in $dirs; do
+    local state
+    state="$(unpushed_state "$d")"
+    [ -n "$state" ] && found="$found
+  ${d#"$APPS_DIR"/}  $state"
+  done
+  [ -z "$found" ] && return 0
+  bold "Work that exists only on this machine (+n unpushed commits · * uncommitted changes):"
+  printf '%s\n' "${found#?}"
+  dim "A library commit that is not pushed will be redone upstream and diverge."
+  dim "Ship it (make libs-ship), push it, or drop it — before starting new work there."
+}
+
+# ── guard ─────────────────────────────────────────────────────────────────────
+# Called by the consumer's pre-commit hook, in whatever repo is being committed.
+# A commit inside one of this repo's library submodules passes only when `ship`
+# makes it — ship pushes in the same step, so no library commit is left behind
+# unpushed. Everything else (the consumer itself, a non-library submodule) passes.
+cmd_guard() {
+  local top="${1:-}" lib
+  [ -n "$top" ] || return 0
+  [ "${LIBS_SHIP:-}" = "1" ] && return 0
+  for lib in $(libs_of "$REPO_ROOT"); do
+    [ "$(cd "$REPO_ROOT/$lib" 2>/dev/null && pwd -P)" = "$(cd "$top" && pwd -P)" ] || continue
+    echo "pre-commit: $(basename "$lib") is a shared library — commit it with ship, which pushes it too:" >&2
+    echo "    make libs-ship LIB=$(basename "$lib") M=\"what changed\" FILES=\"<paths in $(basename "$lib")>\"" >&2
+    echo "  A library commit left unpushed is redone upstream and diverges." >&2
+    return 1
+  done
   return 0
 }
 
@@ -346,9 +401,9 @@ cmd_work() {
   bold "$(basename "$lib") is on $branch at $(git -C "$dir" rev-parse --short HEAD)"
   echo
   echo "  Edit and test it here — this consumer's suite and dev server see the change."
-  echo "  When it works:  ./scripts/fe-libs.sh publish $(basename "$lib")"
+  echo "  When it works:  make libs-ship LIB=$(basename "$lib") M=\"what changed\" FILES=\"...\""
   echo
-  dim "Commit inside $lib as usual. Nothing is shared until publish pushes it."
+  dim "Do not commit inside $lib yourself: ship commits, gates and pushes in one step."
 }
 
 # ── publish ───────────────────────────────────────────────────────────────────
@@ -468,7 +523,7 @@ cmd_ship() {
     git -C "$dir" add -- $FILES || { echo "  could not stage FILES in $lib" >&2; return 1; }
   fi
   if ! git -C "$dir" diff --cached --quiet; then
-    if ! git -C "$dir" commit --quiet -m "$msg"; then
+    if ! LIBS_SHIP=1 git -C "$dir" commit --quiet -m "$msg"; then
       echo "  commit failed in $lib" >&2
       return 1
     fi
@@ -513,21 +568,7 @@ cmd_ship() {
   short="${sha:0:8}"
   printf '  pushed %s commit(s) to origin/%s — now at %s\n' "$ahead" "$branch" "$short"
 
-  # 5. The sibling checkout, so codegen does not write against a stale tree.
-  local sib
-  sib="$(sibling_of "$lib")"
-  if [ -d "$sib/.git" ]; then
-    git -C "$sib" fetch origin --quiet 2>/dev/null
-    if [ -n "$(git -C "$sib" status --porcelain)" ]; then
-      printf '  sibling checkout has uncommitted changes — not moved\n'
-    elif git -C "$sib" merge --ff-only "origin/$branch" >/dev/null 2>&1; then
-      printf '  sibling checkout fast-forwarded\n'
-    else
-      printf '  sibling checkout has DIVERGED — needs a human\n'
-    fi
-  fi
-
-  # 6. Every consumer onto the commit that now exists in the library.
+  # 5. Every consumer onto the commit that now exists in the library.
   echo
   bold "Bumping consumers to $short"
   local to_push=""
@@ -603,7 +644,9 @@ push_pointer_only() {
   fi
   other="$(git -C "$croot" diff --name-only '@{u}..HEAD' | grep -vxF -f <(libs_of "$croot") || true)"
   if [ -n "$other" ]; then
-    printf '  %-6s NOT pushed — its unpushed commits also touch: %s\n' "$c" "$(echo "$other" | head -5 | tr '\n' ' ')"
+    printf '  %-6s NOT pushed — it carries unpushed commits that are not pointer moves:\n' "$c"
+    git -C "$croot" log --format='           %h %an: %s' '@{u}..HEAD' -- $(echo "$other" | head -20)
+    printf '           push them yourself once their author agrees: git -C %s push\n' "$croot"
     return
   fi
   if git -C "$croot" push --quiet 2>/dev/null; then
@@ -639,12 +682,13 @@ gate_in_consumer() {
 
 case "${1:-status}" in
   status)  shift || true; cmd_status "${1:-}" ;;
-  sync)    cmd_sync ;;
+  drift)   shift || true; cmd_drift "${1:-}" ;;
+  guard)   shift || true; cmd_guard "${1:-}" ;;
   bump)    cmd_bump ;;
   verify)  cmd_verify ;;
   work)    shift; cmd_work "${1:-}" ;;
   publish) shift; cmd_publish "${1:-}" ;;
   ship)    shift; cmd_ship "$@" ;;
   attach)  cmd_attach ;;
-  *) echo "usage: $0 {status [--fetch]|attach|work <lib>|ship <lib> <msg>|publish [lib]|sync|bump|verify}" >&2; exit 2 ;;
+  *) echo "usage: $0 {status [--fetch]|drift [--fetch]|attach|work <lib>|ship <lib> <msg>|publish [lib]|bump|verify|guard <dir>}" >&2; exit 2 ;;
 esac

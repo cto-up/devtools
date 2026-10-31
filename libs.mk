@@ -21,8 +21,8 @@ libs-ship: ## Commit + gate + push a library, bump every consumer (LIB=name M="m
 libs-publish: ## Push a submodule's commits to its library, then stage the pointer (LIB=name)
 	@$(FE_LIBS) publish $(LIB)
 
-libs-sync: ## Fast-forward every sibling checkout
-	@$(FE_LIBS) sync
+libs-drift: ## Only what is unpushed or uncommitted, in every consumer and Go library (add ARGS=--fetch)
+	@$(FE_LIBS) drift $(ARGS)
 
 libs-bump: ## Move THIS repo's submodule pointers to each library's default branch
 	@$(FE_LIBS) bump
@@ -38,4 +38,4 @@ submodules-update: ## Clone any missing submodule, then move every pointer to it
 libs-verify: ## Fail if a pointer is not on its library's default branch (CI guard)
 	@$(FE_LIBS) verify
 
-.PHONY: libs-status libs-attach libs-work libs-ship libs-publish libs-sync libs-bump submodules-update libs-verify
+.PHONY: libs-status libs-attach libs-work libs-ship libs-publish libs-drift libs-bump submodules-update libs-verify
