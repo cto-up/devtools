@@ -42,6 +42,7 @@ import json
 import os
 import pathlib
 import re
+import subprocess
 import sys
 
 REPO = pathlib.Path.cwd()
@@ -291,6 +292,17 @@ def main() -> int:
     if args.check:
         stale = [f"missing stub: docs-site/{args.site}/{out}" for _, out in pairs
                  if not (site_dir / out).exists()]
+        # On a case-insensitive disk git keeps a stub's old case after a
+        # case-only rename; Linux CI then finds the nav pointing at a file the
+        # tree does not have. Catch it here, before a push.
+        tracked = subprocess.run(["git", "ls-files", f"docs-site/{args.site}"], cwd=REPO,
+                                 capture_output=True, text=True).stdout.split("\n")
+        by_lower = {t.lower(): t for t in tracked if t}
+        for _, out in pairs:
+            want = f"docs-site/{args.site}/{out.as_posix()}"
+            have = by_lower.get(want.lower())
+            if have and have != want:
+                stale.append(f"git tracks {have}, the nav needs {want}: git mv -f {have} {want}")
         if current != head + nav:
             stale.append(f"{config.name} nav is out of date")
         if stale:
