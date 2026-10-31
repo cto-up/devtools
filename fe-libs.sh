@@ -50,8 +50,14 @@ need_consumers() {
   [ -n "$CONSUMERS" ] || { echo "set FE_LIB_CONSUMERS (the consumer repos, siblings of this one)" >&2; exit 2; }
 }
 
-bold() { printf '\033[1m%s\033[0m\n' "$*"; }
-dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
+# Plain text when not on a terminal: hook output lands in an agent's context.
+if [ -t 1 ]; then
+  bold() { printf '\033[1m%s\033[0m\n' "$*"; }
+  dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
+else
+  bold() { printf '%s\n' "$*"; }
+  dim()  { printf '%s\n' "$*"; }
+fi
 
 # Submodule paths that look like a shared frontend library, plus this tooling
 # itself and the shared docs, so a change there ships and is verified like any
