@@ -139,7 +139,11 @@ HREF = re.compile(r'href="(/[^"#?]*)')
 
 def cmd_site_links(a):
     root = pathlib.Path(a.site_root)
-    sites = {d.name for d in root.iterdir() if d.is_dir()}
+    if not root.is_dir():
+        print(f"{root}/ not found: build and stage the docs sites first "
+              "(one folder per site in docs-site/sites.json)", file=sys.stderr)
+        return 2
+    sites ={d.name for d in root.iterdir() if d.is_dir()}
     bad = []
     for page in sorted(root.rglob("*.html")):
         for href in set(HREF.findall(page.read_text(encoding="utf-8", errors="replace"))):
