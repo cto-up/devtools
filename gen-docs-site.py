@@ -62,7 +62,14 @@ TYPE_SECTIONS = [
     ("Plans", "plan"),
 ]
 
-AUDIENCE_SECTIONS = [("Orientation", "orientation"), ("Tasks", "tasks"), ("Reference", "reference")]
+# An audience site follows Diátaxis (platform-docs style guide, "Every page has
+# one audience"): a reader picks a door by what they need, not by folder.
+AUDIENCE_TYPES = [
+    ("Start here", "tutorial"),
+    ("Tasks", "how-to"),
+    ("Reference", "reference"),
+    ("Concepts", "explanation"),
+]
 
 STUB_MARKER = "include-markdown"
 
@@ -168,30 +175,44 @@ def write_stubs(site_dir: pathlib.Path, pairs) -> tuple[int, int]:
 
 
 def build_audience_nav(pairs, sections) -> str:
-    sections = sections or AUDIENCE_SECTIONS
-    buckets = {key: [] for _, key in sections}
-    loose = []
-    for rel, out_rel in pairs:
-        head = out_rel.parts[0] if len(out_rel.parts) > 1 else None
-        (buckets[head] if head in buckets else loose).append((rel, out_rel))
+    """Pages grouped by type, in AUDIENCE_TYPES order. A site with `sections`
+    (Using / Building) keeps them, and groups by type inside each one."""
 
-    def row(pair, indent=6):
+    def row(pair, indent):
         rel, out_rel = pair
         return f"{' ' * indent}- {yaml_quote(title_of(DOCS / rel))}: {out_rel.as_posix()}\n"
 
+    def by_type(rows, indent):
+        groups = {key: [] for _, key in AUDIENCE_TYPES}
+        other = []
+        for pair in rows:
+            kind = front_matter(DOCS / pair[0]).get("type")
+            (groups[kind] if kind in groups else other).append(pair)
+        filled = [(label, groups[key]) for label, key in AUDIENCE_TYPES if groups[key]]
+        if other:
+            filled.insert(0, ("Overview", other))
+        pad = " " * indent
+        out = []
+        for label, rs in filled:
+            out.append(f"{pad}- {yaml_quote(label)}:\n")
+            out += [row(p, indent + 4) for p in sorted(rs, key=lambda p: p[1].as_posix())]
+        return out
+
+    pages = [p for p in pairs if p[1].as_posix() != "index.md"]
     out = ["nav:\n", "  - Home: index.md\n"]
-    # Loose top-level pages first (orientation material), minus the hand-written index.
-    top = [p for p in loose if p[1].name != "index.md"]
-    if top:
-        out.append('  - "Orientation":\n')
-        out += [row(p) for p in sorted(top, key=lambda p: p[1].as_posix())]
+    if not sections:
+        return "".join(out + by_type(pages, 2))
+
+    buckets = {key: [] for _, key in sections}
+    loose = []
+    for pair in pages:
+        head = pair[1].parts[0] if len(pair[1].parts) > 1 else None
+        (buckets[head] if head in buckets else loose).append(pair)
+    out += by_type(loose, 2)
     for label, key in sections:
-        rows = buckets[key]
-        if not rows:
-            continue
-        out.append(f"  - {yaml_quote(label)}:\n")
-        rows.sort(key=lambda p: p[1].as_posix())
-        out += [row(p) for p in rows]
+        if buckets[key]:
+            out.append(f"  - {yaml_quote(label)}:\n")
+            out += by_type(buckets[key], 6)
     return "".join(out)
 
 
