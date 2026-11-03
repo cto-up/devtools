@@ -30,10 +30,12 @@ docs-site-links: ## Cross-site links in the built sites under site/ (after a doc
 
 DOCS_SITES      ?= $(shell python3 -c "import json;print(' '.join(json.load(open('docs-site/sites.json'))['sites']))" 2>/dev/null)
 
-docs-sync: ## Regenerate every site's stubs + nav — run after adding or moving a doc
+docs-sync: ## Regenerate every site's stubs + nav, and the product's brand — run after adding or moving a doc, or a rebrand
 	@for s in $(DOCS_SITES); do python3 devtools/gen-docs-site.py --site $$s || exit 1; done
+	@python3 devtools/gen-docs-brand.py
 
-docs-sync-check: ## Fail if a site's stubs or nav are stale (what CI runs)
+docs-sync-check: ## Fail if a site's stubs, nav or brand are stale (what CI runs)
 	@for s in $(DOCS_SITES); do python3 devtools/gen-docs-site.py --check --site $$s || exit 1; done
+	@python3 devtools/gen-docs-brand.py --check
 
 .PHONY: docs-lint docs-stale docs-site-links docs-sync docs-sync-check
