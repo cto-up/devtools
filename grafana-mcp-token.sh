@@ -9,12 +9,16 @@
 # (through write-secrets.sh, next to this script) and revokes its older tokens.
 # A token rotates on every deploy; the sidecar is recreated right after.
 #
-# It logs in as Grafana's admin with the credentials the grafana container was
-# started with. Fails (non-zero, file left as it was) when Grafana is not
-# healthy within 90s, the login is refused, or `mcp-grafana` exists with a role
-# other than Viewer: the sidecar then keeps its previous token, or stays off.
+# It logs in as Grafana's admin (the user the grafana container was started
+# with) with GRAFANA_ADMIN_PASSWORD. When Grafana refuses it, the password is
+# set to GRAFANA_ADMIN_PASSWORD with `grafana cli` first: that variable, not
+# whatever was typed in the UI, is the admin password. Fails (non-zero, file
+# left as it was) when the variable is empty, Grafana is not healthy within
+# 90s, or `mcp-grafana` exists with a role other than Viewer: the sidecar then
+# keeps its previous token, or stays off.
 #
-# Env: GRAFANA_URL (http://127.0.0.1:3000), GRAFANA_CONTAINER (grafana).
+# Env: GRAFANA_ADMIN_PASSWORD (required), GRAFANA_URL (http://127.0.0.1:3000),
+# GRAFANA_CONTAINER (grafana).
 set -eu
 
 [ $# -eq 1 ] || { echo "usage: $0 <secrets-dir>" >&2; exit 2; }
@@ -23,8 +27,11 @@ here=$(cd "$(dirname "$0")" && pwd)
 url=${GRAFANA_URL:-http://127.0.0.1:3000}
 container=${GRAFANA_CONTAINER:-grafana}
 name=mcp-grafana
+pass=${GRAFANA_ADMIN_PASSWORD:-}
 
 fail() { echo "grafana-mcp-token: $*" >&2; exit 1; }
+
+[ -n "$pass" ] || fail "GRAFANA_ADMIN_PASSWORD is empty: set it per environment (platform-infra make gitlab)"
 
 i=0
 until curl -fsS -o /dev/null "$url/api/health" 2>/dev/null; do
@@ -34,7 +41,6 @@ until curl -fsS -o /dev/null "$url/api/health" 2>/dev/null; do
 done
 
 user=$(sudo docker exec "$container" printenv GF_SECURITY_ADMIN_USER) || fail "cannot read the admin user from container $container"
-pass=$(sudo docker exec "$container" printenv GF_SECURITY_ADMIN_PASSWORD) || fail "cannot read the admin password from container $container"
 
 # The credentials go through a 0600 curl config, never on a command line.
 cfg=$(mktemp)
@@ -49,9 +55,20 @@ api() {
   curl -fsS -K "$cfg" -X "$method" -H 'Content-Type: application/json' "$@" "$url$path"
 }
 
+login() { curl -sS -o /dev/null -w '%{http_code}' -K "$cfg" "$url/api/user" || true; }
+
+status=$(login)
+if [ "$status" = 401 ]; then
+  printf '%s\n' "$pass" | sudo docker exec -i "$container" grafana cli admin reset-admin-password --password-from-stdin >/dev/null \
+    || fail "cannot set Grafana's admin password"
+  echo "==> set Grafana's admin password to GRAFANA_ADMIN_PASSWORD"
+  status=$(login)
+fi
+[ "$status" = 200 ] || fail "Grafana refused the admin login (HTTP $status)"
+
 json() { python3 -I -c "import json,sys; d=json.load(sys.stdin); $1"; }
 
-found=$(api GET "/api/serviceaccounts/search?perpage=1000&query=$name") || fail "Grafana refused the admin login"
+found=$(api GET "/api/serviceaccounts/search?perpage=1000&query=$name") || fail "cannot list Grafana service accounts"
 sa=$(printf '%s' "$found" | json "
 m=[a for a in d['serviceAccounts'] if a['name']=='$name']
 print('%s %s' % (m[0]['id'], m[0]['role']) if m else '')")
