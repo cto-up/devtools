@@ -15,6 +15,7 @@ same way a library fix does.
 | `deploy.mk` | `deploy_branch`: merges main into an environment branch and pushes it with the consumer's `_PUSH_FLAGS`; when the branch is already level with main (an empty push starts no pipeline), it starts the pipeline through the API with the same variables. See its header. |
 | `docs.mk` | The `make docs-lint` / `docs-stale` / `docs-site-links` targets that call `docs-check.py` and Vale. See its header. |
 | `secrets-check.sh` | Checks a consumer's `infra/secrets.list` against its compose files and the platform's secrets template (`lint`), and that the secrets the backend cannot boot without are set before a deploy (`set`). See its header. |
+| `grafana-mcp-token.sh` | Run on the server by a backend deploy: gives the `mcp-grafana` sidecar a fresh Grafana Viewer token (creating the `mcp-grafana` service account if needed) and revokes the older ones, so `GRAFANA_MCP_TOKEN` is never a CI/CD variable. See its header. |
 | `docs-check.py` | Checks for a `docs/` tree: front matter, stale pages, relative and cross-site links, forbidden words, env vars the Go code reads but the docs never name. See its header. |
 
 ## Using it in a consumer
