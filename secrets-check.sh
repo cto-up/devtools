@@ -6,12 +6,15 @@
 #   secrets-check.sh set  <list>
 #
 # <list> (e.g. infra/secrets.list) names every secret the compose files mount
-# from ./secrets/<uid>/<NAME>, one per line, as `NAME SOURCE [required]`:
+# from ./secrets/<uid>/<NAME>, one per line, as `NAME SOURCE [required] [@gen]`:
 #
 #   platform  a CI/CD variable the platform's secrets template generates
 #   product   a CI/CD variable this product sets by hand
 #   derived   built by the deploy from other variables; never a CI/CD variable
 #   required  the backend refuses to boot without it (platform or product only)
+#   @gen      product only: @hex32, @hex16 or @base64-32, the random value
+#             platform-infra's `make new-env` generates for a new environment
+#             instead of asking for it (a key, a pepper; never a vendor's key)
 #
 # lint fails when a compose secret is not listed, a listed one is mounted by no
 # compose file, or a platform secret is missing from <template> (a
@@ -32,8 +35,14 @@ entries() {
     {
       if ($1 !~ /^[A-Za-z_][A-Za-z0-9_]*$/) { printf "%s:%d: not a variable name: %s\n", f, NR, $1 > "/dev/stderr"; bad=1; next }
       if ($2 != "platform" && $2 != "product" && $2 != "derived") { printf "%s:%d: %s: source must be platform, product or derived\n", f, NR, $1 > "/dev/stderr"; bad=1; next }
-      req = ($3 == "required")
-      if (NF > 3 || (NF == 3 && !req)) { printf "%s:%d: %s: only `required` may follow the source\n", f, NR, $1 > "/dev/stderr"; bad=1; next }
+      req = 0; gen = ""; extra = 0
+      for (i = 3; i <= NF; i++) {
+        if ($i == "required" && !req) req = 1
+        else if ($i ~ /^@(hex32|hex16|base64-32)$/ && gen == "") gen = $i
+        else extra = 1
+      }
+      if (extra) { printf "%s:%d: %s: only `required` and one of @hex32, @hex16, @base64-32 may follow the source\n", f, NR, $1 > "/dev/stderr"; bad=1; next }
+      if (gen != "" && $2 != "product") { printf "%s:%d: %s: a generator is for product secrets only\n", f, NR, $1 > "/dev/stderr"; bad=1; next }
       if (req && $2 == "derived") { printf "%s:%d: %s: a derived secret cannot be required\n", f, NR, $1 > "/dev/stderr"; bad=1; next }
       if (seen[$1]++) { printf "%s:%d: %s listed twice\n", f, NR, $1 > "/dev/stderr"; bad=1; next }
       print $1, $2, req
